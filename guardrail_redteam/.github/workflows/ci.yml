@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal test dependencies
+        run: pip install pytest
+      # Note: the offline test suite (tests/) exercises attack logic, metrics,
+      # and statistics using MockClassifier / pure-Python fallbacks, so it
+      # deliberately does NOT require transformers/torch/datasets or any
+      # network access to huggingface.co -- this keeps CI fast and makes the
+      # core algorithmic logic verifiable without downloading model weights.
+      - name: Run offline test suite
+        run: python -m pytest tests/ -v
