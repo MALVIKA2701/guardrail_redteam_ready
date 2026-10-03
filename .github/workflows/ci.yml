@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install minimal test dependencies
-        run: pip install pytest
+        run: pip install pytest requests numpy
       # Note: the offline test suite (tests/) exercises attack logic, metrics,
       # and statistics using MockClassifier / pure-Python fallbacks, so it
       # deliberately does NOT require transformers/torch/datasets or any
