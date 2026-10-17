@@ -47,6 +47,7 @@ from attacks.genetic_search_attack import genetic_search_attack
 from attacks.paraphrase_attack import paraphrase_attack, HFParaphraser
 from metrics.perturbation_cost import SemanticSimilarity
 from stats import bootstrap_asr_ci, mcnemar_test, paired_asr_difference_ci, holm_bonferroni_correction
+from deferral.benign_sources import SOURCES as BENIGN_SOURCES, select_benign
 from deferral.selective_guardrail import (
     ALLOW, DEFER, BLOCK, decide, calibrate_lower_edge, adaptive_score_fn,
     ensemble_max_score, decision_rates,
@@ -63,15 +64,24 @@ class _MockVariant(MockClassifier):
         self.MARKERS = markers
 
 
-def build_classifiers(mock: bool, signal: str):
+def build_classifiers(mock: bool, signal: str, primary_key: str = None):
+    """primary_key: a key of config.LOCAL_SURROGATE_REGISTRY (default: the
+    entry for config.LOCAL_SURROGATE_MODEL). The other registry models form
+    the rest of the ensemble."""
     if mock:
         primary = MockClassifier()
         others = [_MockVariant(["idiot", "nobody wants", "hates", "shut"]),
                   _MockVariant(["disgusting", "stupid", "get out", "worst"])]
     else:
-        primary = LocalSurrogateClassifier(config.LOCAL_SURROGATE_MODEL)
-        others = [LocalSurrogateClassifier(m) for m in config.LOCAL_SURROGATE_REGISTRY.values()
-                  if m != config.LOCAL_SURROGATE_MODEL]
+        registry = config.LOCAL_SURROGATE_REGISTRY
+        if primary_key is None:
+            primary_name = config.LOCAL_SURROGATE_MODEL
+        elif primary_key in registry:
+            primary_name = registry[primary_key]
+        else:
+            raise ValueError(f"unknown --primary {primary_key!r}; choose from {list(registry)}")
+        primary = LocalSurrogateClassifier(primary_name)
+        others = [LocalSurrogateClassifier(m) for m in registry.values() if m != primary_name]
     if signal == "single":
         deferral_fn = primary.score
     elif signal == "ensemble":
@@ -116,7 +126,12 @@ def _mean(xs):
 def run_study(data, primary, deferral_fn, attack_names: List[str], budgets: List[float],
               cal_fraction: float = 0.5, seed: int = None, max_queries: int = None,
               min_similarity: float = None, sim_fn=None, paraphraser=None,
-              max_attack_examples: int = None) -> dict:
+              max_attack_examples: int = None, benign_texts: List[str] = None) -> dict:
+    """
+    benign_texts: optional benign pool for calibration + testing (split by
+    cal_fraction). If None, the benign texts of `data` are used, which is
+    the original setting.
+    """
     seed = config.RANDOM_SEED if seed is None else seed
     max_queries = max_queries or config.MAX_QUERIES_PER_EXAMPLE
     min_similarity = min_similarity or config.MIN_SEMANTIC_SIMILARITY
@@ -125,7 +140,10 @@ def run_study(data, primary, deferral_fn, attack_names: List[str], budgets: List
     if paraphraser is None and "paraphrase" in attack_names:
         paraphraser = HFParaphraser()
 
-    cal_benign, test_benign = split_benign(data, cal_fraction, seed)
+    if benign_texts is None:
+        cal_benign, test_benign = split_benign(data, cal_fraction, seed)
+    else:
+        cal_benign, test_benign = split_benign([(b, 0) for b in benign_texts], cal_fraction, seed)
     # Attack only true positives (labeled toxic AND blocked), as in evaluate.py.
     toxic = [txt for txt, y in data if y == 1]
     targets = [txt for txt in toxic if primary.score(txt) >= t]
@@ -269,6 +287,15 @@ def main():
     p.add_argument("--attacks", default="char,word,genetic")
     p.add_argument("--budgets", default="0,0.05,0.1,0.2")
     p.add_argument("--signal", choices=["single", "ensemble"], default="single")
+    p.add_argument("--primary", default=None,
+                   help=f"primary classifier, one of {list(config.LOCAL_SURROGATE_REGISTRY)} "
+                        f"(default: {config.LOCAL_SURROGATE_MODEL})")
+    p.add_argument("--benign_source", choices=list(BENIGN_SOURCES), default="jigsaw",
+                   help="benign traffic the band is calibrated and tested on")
+    p.add_argument("--n_benign", type=int, default=400,
+                   help="benign texts for jigsaw_hard / hatexplain (split into calibration and test)")
+    p.add_argument("--seed", type=int, default=config.RANDOM_SEED,
+                   help="seed for the data sample and the calibration/test split")
     p.add_argument("--cal_fraction", type=float, default=0.5)
     p.add_argument("--max_attack_examples", type=int, default=None)
     p.add_argument("--mock", action="store_true", help="offline smoke test with MockClassifier")
@@ -276,21 +303,48 @@ def main():
     if args.mock:
         config.ALLOW_OFFLINE_FALLBACK = True
 
-    data = load_dataset(name=args.dataset, n_samples=args.n_samples)
-    primary, deferral_fn = build_classifiers(args.mock, args.signal)
+    data = load_dataset(name=args.dataset, n_samples=args.n_samples, seed=args.seed)
+    primary, deferral_fn = build_classifiers(args.mock, args.signal, args.primary)
     attacks = [a.strip() for a in args.attacks.split(",") if a.strip()]
     budgets = [float(b) for b in args.budgets.split(",")]
 
-    results = run_study(data, primary, deferral_fn, attacks, budgets,
-                        cal_fraction=args.cal_fraction, max_attack_examples=args.max_attack_examples)
-    results["config"].update({"signal": args.signal, "mock": args.mock, "dataset": args.dataset})
+    benign_texts = None
+    if args.benign_source != "jigsaw":
+        if args.mock:
+            loader = lambda: list(data)  # offline: reuse the fallback sample
+        elif args.benign_source == "jigsaw_hard":
+            from data.load_data import _load_jigsaw
+            loader = _load_jigsaw
+        else:
+            from data.load_data import _load_hatexplain
+            loader = _load_hatexplain
+        benign_texts = select_benign(args.benign_source, data, args.n_benign, args.seed,
+                                     full_pairs_loader=loader)
+        print(f"Using {len(benign_texts)} benign texts from '{args.benign_source}'")
+        if len(benign_texts) < 40 and not args.mock:
+            raise RuntimeError(f"only {len(benign_texts)} benign texts from {args.benign_source}; "
+                               f"too few to calibrate a review budget")
 
+    results = run_study(data, primary, deferral_fn, attacks, budgets, seed=args.seed,
+                        cal_fraction=args.cal_fraction, max_attack_examples=args.max_attack_examples,
+                        benign_texts=benign_texts)
+    primary_name = "mock" if args.mock else (config.LOCAL_SURROGATE_REGISTRY.get(args.primary)
+                                             or config.LOCAL_SURROGATE_MODEL)
+    results["config"].update({"signal": args.signal, "mock": args.mock, "dataset": args.dataset,
+                              "primary": primary_name, "benign_source": args.benign_source})
+
+    # The original run (default primary, jigsaw benign, default seed) keeps
+    # its original file name; every other setting gets a tagged one.
+    default_run = (args.primary in (None, "toxic_bert") and args.benign_source == "jigsaw"
+                   and args.seed == config.RANDOM_SEED)
+    tag = args.signal if default_run else (
+        f"{args.signal}_{args.primary or 'toxic_bert'}_{args.benign_source}_s{args.seed}")
     os.makedirs(config.RESULTS_DIR, exist_ok=True)
-    out = DEFERRAL_RESULTS_PATH.replace(".json", f"_{args.signal}.json")
+    out = DEFERRAL_RESULTS_PATH.replace(".json", f"_{tag}.json")
     with open(out, "w") as f:
         json.dump(results, f, indent=2)
-    md = DEFERRAL_SUMMARY_PATH.replace(".md", f"_{args.signal}.md")
-    write_summary(results, md, args.signal, "mock" if args.mock else config.LOCAL_SURROGATE_MODEL)
+    md = DEFERRAL_SUMMARY_PATH.replace(".md", f"_{tag}.md")
+    write_summary(results, md, args.signal, f"{primary_name} · benign: {args.benign_source} · seed {args.seed}")
     print(open(md).read())
     print(f"Saved {out} and {md}")
 

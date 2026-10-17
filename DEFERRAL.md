@@ -84,6 +84,25 @@ python deferral_study.py --n_samples 400 --attacks char,word,genetic --budgets 0
 python deferral_study.py --n_samples 400 --attacks char,word,genetic --signal ensemble
 ```
 
+### Robustness checks
+
+| Option | What it tests |
+|---|---|
+| `--primary toxic_bert` / `toxic_comment_distilbert` / `roberta_hate_dynabench` | Whether the result holds for each classifier, not just toxic-bert |
+| `--benign_source jigsaw` | The original setting: mild Jigsaw comments |
+| `--benign_source jigsaw_hard` | Benign-labelled Jigsaw comments containing strong language or insult-adjacent words (`deferral/benign_sources.py`), selected by word list, never by a model's score |
+| `--benign_source hatexplain` | "Normal" posts from HateXplain: a different platform and period |
+| `--seed 43` | A different data sample and calibration/test split |
+
+The attacked toxic texts are the same in every benign setting; only the
+benign traffic the band is calibrated and tested on changes. Benign texts
+that also appear in the attacked sample are excluded.
+
+`bash run_deferral_suite.sh` runs all of these (about an hour on a free
+Colab T4 GPU), then `deferral_report.py` builds one trade-off figure per run
+(`results/figures/deferral_tradeoff_*.png`) and a combined table with seeds
+pooled into mean ± std (`results/deferral_summary_all.md`).
+
 `--budgets 0` is included on purpose: a budget of 0 turns the band off and
 reproduces the original binary guardrail, so every table carries its own
 baseline.

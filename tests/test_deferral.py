@@ -228,3 +228,76 @@ def test_run_study_end_to_end_offline():
         assert e["adaptive_attack_asr_with_band"]["asr"] == e["binary_asr_no_band"]["asr"]
         for entry in res["by_budget"]:
             assert "holm" in entry["attacks"][a]["mcnemar_no_band_vs_adaptive"]
+
+
+# ------------------------------------------------- benign sources
+
+from deferral.benign_sources import is_hard_benign, select_benign
+
+
+def test_hard_benign_matches_whole_words_only():
+    assert is_hard_benign("This plan is ridiculous, honestly.")
+    assert is_hard_benign("Shut up, that's hilarious")
+    assert not is_hard_benign("Shelling peanuts in Hellenic history class")  # 'hell' inside a word
+    assert not is_hard_benign("Thanks for the edit.")
+
+
+def test_select_benign_hard_excludes_attacked_sample_and_toxic():
+    sample = [("you are a stupid idiot", 1), ("nice work", 0)]
+    full = [("you are a stupid idiot", 1), ("what a stupid rule", 0),
+            ("the worst traffic today", 0), ("lovely weather", 0), ("nice work", 0)]
+    got = select_benign("jigsaw_hard", sample, n=10, seed=0, full_pairs_loader=lambda: full)
+    assert set(got) == {"what a stupid rule", "the worst traffic today"}
+
+
+def test_select_benign_is_reproducible_and_capped():
+    full = [(f"this is stupid number {i}", 0) for i in range(50)]
+    a = select_benign("jigsaw_hard", [], n=10, seed=3, full_pairs_loader=lambda: full)
+    b = select_benign("jigsaw_hard", [], n=10, seed=3, full_pairs_loader=lambda: full)
+    assert a == b and len(a) == 10
+
+
+def test_select_benign_rejects_unknown_source():
+    with pytest.raises(ValueError):
+        select_benign("reddit", [], n=5, seed=0)
+
+
+def test_run_study_accepts_external_benign_pool():
+    from deferral_study import run_study
+    data = [("you are an idiot stupid awful person", 1), ("what a stupid hate filled awful idea", 1)]
+    pool = [f"have a nice day number {i}" for i in range(30)]
+    clf = _Smooth()
+    res = run_study(data, clf, clf.score, ["word"], [0.0, 0.1], sim_fn=permissive_sim,
+                    max_queries=40, min_similarity=0.0, benign_texts=pool)
+    assert res["config"]["n_cal_benign"] + res["config"]["n_test_benign"] == 30
+
+
+# ------------------------------------------------- report
+
+def _fake_run(seed, word_adaptive):
+    def att(nb, ad, st):
+        ci = {"asr": ad, "ci_low": max(ad - 0.02, 0), "ci_high": ad + 0.02, "n": 100}
+        return {"binary_asr_no_band": {"asr": nb}, "adaptive_attack_asr_with_band": ci,
+                "standard_attack_asr_with_band": {"asr": st}}
+    return {"config": {"attacks": ["word"], "n_attack_targets": 100, "seed": seed,
+                       "signal": "single", "primary": "m", "benign_source": "jigsaw"},
+            "by_budget": [
+                {"review_budget": 0.0, "test_benign_review_rate": {"asr": 0.0},
+                 "attacks": {"word": att(0.4, 0.4, 0.4)}},
+                {"review_budget": 0.1, "test_benign_review_rate": {"asr": 0.08},
+                 "attacks": {"word": att(0.4, word_adaptive, 0.02)}}]}
+
+
+def test_combined_table_pools_seeds():
+    from deferral_report import combined_table
+    table = combined_table([_fake_run(1, 0.10), _fake_run(2, 0.06)])
+    assert "| 2 |" in table                  # two seeds pooled into one row group
+    assert "8.0 ± 2.0%" in table             # mean ± std of 10% and 6%
+
+
+def test_plot_run_writes_png(tmp_path):
+    pytest.importorskip("matplotlib")
+    from deferral_report import plot_run
+    out = tmp_path / "fig.png"
+    plot_run(_fake_run(1, 0.1), str(out))
+    assert out.exists() and out.stat().st_size > 0

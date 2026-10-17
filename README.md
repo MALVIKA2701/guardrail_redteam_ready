@@ -24,6 +24,8 @@ First full run: `unitary/toxic-bert`, Jigsaw toxic comments, 181 attacked
 toxic texts, 100 calibration and 100 test benign texts, single-model
 deferral signal. Brackets are 95% bootstrap confidence intervals.
 
+![Attack success vs. human-review rate for the character, word-substitution and genetic attacks, standard and adaptive attackers](docs/figures/deferral_tradeoff_toxicbert_jigsaw.png)
+
 **Attack success rate (ASR) against an adaptive attacker that knows the band**
 
 | Review budget | Benign texts sent to review (test set) | Character | Word substitution | Genetic |
@@ -60,7 +62,9 @@ Full tables, McNemar tests with Holm correction, and query counts are in
 
 **Caveats.** Results are from one model, one dataset and one run. Jigsaw's
 benign comments are mostly mild; benign but heated or profane text would
-score higher and make the band more expensive. The no-band word-attack ASR
+score higher and make the band more expensive; `run_deferral_suite.sh`
+tests this directly with a "hard benign" set, plus all three classifiers
+and three seeds. The no-band word-attack ASR
 differed slightly between two runs on identical inputs (37.6% vs 34.2%),
 probably GPU non-determinism near the 0.5 threshold, so treat differences
 of a few points as noise. The ensemble signal is being rerun after a
@@ -74,12 +78,12 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu   # or the CU
 pip install -r requirements.txt
 python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
 
-python -m pytest tests/ -q                         # 75 offline tests, no downloads
+python -m pytest tests/ -q                         # 86 offline tests, no downloads
 
 # Part 2: deferral study
 python deferral_study.py --mock --n_samples 8      # offline smoke test
 python deferral_study.py --n_samples 400 --attacks char,word,genetic
-python deferral_study.py --n_samples 400 --attacks char,word,genetic --signal ensemble
+bash run_deferral_suite.sh                         # every setting + figures (~1 h on a free Colab GPU)
 
 # Part 1: robustness study
 ./run_fast.sh
@@ -213,7 +217,7 @@ distinguishable from success that preserves fluent, natural language.
 
 ## Engineering quality
 
-- **`tests/`** — 75 unit tests covering attack logic, metrics, deferral, and
+- **`tests/`** — 86 unit tests covering attack logic, metrics, deferral, and
   statistics, all running fully offline against `MockClassifier` and
   pure-Python fallbacks (no model downloads or network access required).
   Run with `pytest tests/ -v`.
