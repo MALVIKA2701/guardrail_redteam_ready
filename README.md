@@ -1,21 +1,62 @@
-# Adversarial Robustness Evaluation of LLM Guardrail / Moderation Models
+# Selective Guardrail Evaluation
 
-A research framework for systematically evaluating the adversarial robustness
-of safety guardrail / content-moderation classifiers — the layer that sits in
-front of (or alongside) LLMs to catch disallowed content. Most published
-jailbreak research attacks the *generator* (the LLM itself). This project
-instead targets the *classifier* that is supposed to catch bad outputs, on
-the hypothesis that these models are typically smaller, less robustly
-trained, and far less studied than the LLMs they guard.
+**Can a content-moderation guardrail be evaded, and can it tell when it is
+being fooled?**
 
-Built to demonstrate research maturity for a graduate application: a clear
-threat model, multiple complementary attack families, cross-model and
-black-box transfer studies, statistically rigorous evaluation (bootstrap CIs,
-paired significance testing), ablations, a defense contribution, and
-reproducible engineering (tests, CI, auto-generated reporting) — not just a
-single attack script with one headline number.
+Safety guardrails are the classifiers that sit in front of (or alongside) a
+large language model to catch harmful text. Most jailbreak research attacks
+the LLM itself. This project attacks the guardrail instead, then asks a
+second question: if the guardrail is allowed to send uncertain cases to a
+human reviewer, how much evasion does that stop, how much human review does
+it cost, and does it still work against an attacker who knows the policy?
 
-See `ARCHITECTURE.md` for a full pipeline diagram and design rationale.
+| Part | What it asks | Authors |
+|---|---|---|
+| **1. Robustness study** | How easily can three open moderation classifiers be evaded with character, word, paraphrase, genetic and universal-trigger attacks? Do the evasions transfer between models? Does adversarial fine-tuning help? | Malvika Rajeev Kappadan and Samiksha Prasad ([original repo](https://github.com/MALVIKA2701/guardrail_redteam_ready)) |
+| **2. Deferral study** | Can a three-way guardrail (block / defer to a human / allow), calibrated to a fixed human-review budget, stop attacks that a binary guardrail lets through, including adaptive attacks aimed at the deferral band itself? | Samiksha Prasad (`deferral/`, `deferral_study.py`, [`DEFERRAL.md`](DEFERRAL.md)) |
+
+Everything runs on open-weight models on a CPU or a free Colab GPU. No paid
+API is needed; the black-box API targets in Part 1 are optional.
+
+## Results
+
+*To be filled in from `results/deferral_summary_single.md` and
+`results/deferral_summary_ensemble.md` after the full run.*
+
+| Review budget | Attack | ASR, no band | ASR, adaptive attacker with band [95% CI] | Benign review rate on test set |
+|---|---|---|---|---|
+| 0% (binary baseline) | | | | 0% |
+| 5% | | | | |
+| 10% | | | | |
+| 20% | | | | |
+
+ASR (attack success rate) is the share of attacked toxic texts the guardrail
+ends up allowing. The adaptive column is the one to quote: the standard
+attacks stop as soon as they cross the 0.5 threshold, so measuring the band
+against them alone would overstate it (see [`DEFERRAL.md`](DEFERRAL.md)).
+
+## Quick start
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # or the CUDA build on a GPU
+pip install -r requirements.txt
+python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
+
+python -m pytest tests/ -q                         # 75 offline tests, no downloads
+
+# Part 2: deferral study
+python deferral_study.py --mock --n_samples 8      # offline smoke test
+python deferral_study.py --n_samples 400 --attacks char,word,genetic
+python deferral_study.py --n_samples 400 --attacks char,word,genetic --signal ensemble
+
+# Part 1: robustness study
+./run_fast.sh
+```
+
+The first real run downloads the classifiers and the Jigsaw dataset from
+huggingface.co. See `ARCHITECTURE.md` for the Part 1 pipeline and design
+rationale, and `DEFERRAL.md` for Part 2.
 
 ## Research Design
 
@@ -137,7 +178,7 @@ distinguishable from success that preserves fluent, natural language.
   histograms, defense before/after comparison) as PNGs.
 - `generate_report.py` — aggregates every result file into a single
   `results/report.md` with embedded figures, ready to hand to a supervisor
-  or paste into a portfolio writeup.
+  or paste into a write-up.
 
 ## Engineering quality
 
@@ -291,15 +332,3 @@ most worth being explicit about:
 - **Explicit opt-in required.** The script refuses to run against real APIs
   unless invoked with `--i-accept-responsible-use`, which forces a
   conscious acknowledgment of the above before any live queries are sent.
-
-## Suggested paper/portfolio structure mapped to this codebase
-
-1. Intro/motivation — this README's opening paragraph
-2. Threat model — "Threat model" section above, `ARCHITECTURE.md`
-3. Methods — `attacks/*.py` docstrings, the attack-family table above
-4. Experimental setup — `config.py`, `data/load_data.py`
-5. Results — `results/report.md`, `results/figures/*.png`
-6. Statistical validation — `stats.py` output
-7. Ablations — `ablations.py` output
-8. Defense — `defense/adversarial_finetune.py` before/after table
-9. Ethics — "Responsible use / ethics note" section above
