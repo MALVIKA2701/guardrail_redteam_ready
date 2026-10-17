@@ -116,6 +116,16 @@ and after fine-tuning — a defense that drops ASR by flagging everything is
 not a real improvement, and this makes that failure mode visible rather
 than hiding behind a single "ASR went down" headline.
 
+### Extension: deferring to human review (`deferral/`, `deferral_study.py`)
+Instead of only blocking or allowing, a selective guardrail can send inputs
+it is unsure about to human review. This extension calibrates a deferral
+band to a chosen human-review budget (split-conformal, on held-out benign
+text), then measures how much evasion it stops against both the standard
+attacks and an **adaptive attacker that knows the band exists**. Signals:
+the primary model's own score, or disagreement across the classifier
+ensemble. See `DEFERRAL.md` for the question, method and how to read the
+results.
+
 ### Perturbation cost (`metrics/perturbation_cost.py`)
 Every attack result is paired with normalized character edit distance and
 semantic similarity, so "success" that mangles text into gibberish is
@@ -131,7 +141,7 @@ distinguishable from success that preserves fluent, natural language.
 
 ## Engineering quality
 
-- **`tests/`** — 59 unit tests covering attack logic, metrics, and
+- **`tests/`** — 75 unit tests covering attack logic, metrics, deferral, and
   statistics, all running fully offline against `MockClassifier` and
   pure-Python fallbacks (no model downloads or network access required).
   Run with `pytest tests/ -v`.
