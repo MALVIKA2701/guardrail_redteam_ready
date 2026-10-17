@@ -33,6 +33,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import random
 from typing import Callable, List
@@ -163,6 +164,8 @@ def run_study(data, primary, deferral_fn, attack_names: List[str], budgets: List
         cal = calibrate_lower_edge([deferral_fn(x) for x in cal_benign],
                                    [primary.score(x) for x in cal_benign], B, t)
         edge = cal["lower_edge"]
+        no_band = math.isinf(edge)
+        cal = {**cal, "lower_edge": None if no_band else cal["lower_edge"]}
 
         test_decisions = [decide(primary.score(x), deferral_fn(x), edge, t) for x in test_benign]
         reviewed = [d == DEFER for d in test_decisions]
@@ -170,7 +173,7 @@ def run_study(data, primary, deferral_fn, attack_names: List[str], budgets: List
 
         entry = {
             "review_budget": B,
-            "lower_edge": round(edge, 6),
+            "lower_edge": None if no_band else round(edge, 6),
             "calibration": cal,
             "test_benign_decisions": decision_rates(test_decisions),
             "test_benign_review_rate": bootstrap_asr_ci(reviewed),
@@ -185,13 +188,13 @@ def run_study(data, primary, deferral_fn, attack_names: List[str], budgets: List
             std_allowed = [decide(primary.score(x["best_text"]), deferral_fn(x["best_text"]), edge, t) == ALLOW
                            for x in std]
 
-            if edge >= t:          # no band: adaptive attacker == standard attacker
+            if no_band:            # budget 0: adaptive attacker == standard attacker
                 adapt = [{"allowed": s, "queries_used": x["queries_used"], "similarity": x["similarity"]}
                          for s, x in zip(std_allowed, std)]
-            elif edge <= 0:        # band covers everything below the threshold
+            elif edge <= 0:        # band covers every allowed text
                 adapt = [{"allowed": False, "queries_used": None, "similarity": None} for _ in std]
             else:
-                f = adaptive_score_fn(deferral_fn, edge, t)
+                f = adaptive_score_fn(deferral_fn, edge, t, block_score_fn=primary.score)
                 adapt = []
                 for i, x in enumerate(std):
                     r = run_attack(a, x["orig_text"], f, sim_fn, paraphraser, i, max_queries, min_similarity)
@@ -246,8 +249,9 @@ def write_summary(results: dict, path: str, signal: str, model_desc: str):
         for a, s in e["attacks"].items():
             ad = s["adaptive_attack_asr_with_band"]
             ad_s = f"{ad['asr']:.1%} [{ad['ci_low']:.1%}, {ad['ci_high']:.1%}]" if ad["asr"] is not None else "n/a"
+            edge_s = "no band" if e["lower_edge"] is None else f"{e['lower_edge']:.3f}"
             lines.append(
-                f"| {e['review_budget']:.0%} | {e['lower_edge']:.3f} | {rr_s} | {a} | "
+                f"| {e['review_budget']:.0%} | {edge_s} | {rr_s} | {a} | "
                 f"{s['binary_asr_no_band']['asr']:.1%} | {s['standard_attack_asr_with_band']['asr']:.1%} | "
                 f"{ad_s} | {s['adaptive_avg_queries']} |"
             )

@@ -74,13 +74,20 @@ def calibrate_lower_edge(benign_deferral_scores: Sequence[float],
     and the conformal rank argument gives P(new benign deferred) <=
     (k + 1) / (n + 1) <= review_budget.
 
-    Returns the edge plus bookkeeping. A budget of 0 returns an edge equal
-    to the block threshold, which reproduces the original binary guardrail.
+    The edge is NOT capped at the block threshold. With the single-model
+    signal it can never exceed it anyway (allowed texts score below the
+    threshold), but with the ensemble signal another model may score benign
+    text above 0.5, and capping the edge there would silently break the
+    budget.
+
+    Returns the edge plus bookkeeping. A budget of 0 returns an infinite
+    edge: nothing is deferred, which reproduces the original binary
+    guardrail for every signal.
     """
     assert len(benign_deferral_scores) == len(benign_block_scores)
     n = len(benign_deferral_scores)
     if review_budget <= 0 or n == 0:
-        return {"lower_edge": block_threshold, "k_allowed": 0, "n_calibration": n,
+        return {"lower_edge": math.inf, "k_allowed": 0, "n_calibration": n,
                 "review_budget": review_budget}
 
     allowed = sorted(
@@ -96,37 +103,51 @@ def calibrate_lower_edge(benign_deferral_scores: Sequence[float],
         # Smallest edge that still keeps the (k+1)-th largest score OUT of
         # the band. nextafter makes the comparison `>= edge` strict for it.
         edge = math.nextafter(allowed[k], math.inf)
-    edge = min(edge, block_threshold)
     return {"lower_edge": edge, "k_allowed": k, "n_calibration": n,
             "review_budget": review_budget}
 
 
 def adaptive_score_fn(deferral_score_fn: Callable[[str], float], lower_edge: float,
-                      block_threshold: float = 0.5) -> Callable[[str], float]:
+                      block_threshold: float = 0.5,
+                      block_score_fn: Callable[[str], float] = None) -> Callable[[str], float]:
     """
-    Wraps a deferral score so that the existing attacks, which all treat
+    Wraps the scores so that the existing attacks, which all treat
     "score < block_threshold" as success, instead keep searching until the
-    deferral score falls below `lower_edge`.
+    text would be ALLOWED by the three-way policy: block score below the
+    threshold AND deferral score below the lower edge.
 
-    The map is monotone increasing and sends lower_edge -> block_threshold,
-    so any comparison an attack makes between two candidates' scores comes
-    out the same; what moves is the stopping rule. (Heuristics built on
-    score DIFFERENCES, such as word-importance ranking, can reorder slightly
-    because the map is piecewise linear; that only changes which equally
-    valid path the search takes, not what counts as success.)
+    With g = max(block / t, deferral / e), the text is allowed exactly when
+    g < 1. The wrapper returns
 
-        s <  e : f(s) = t * s / e
-        s >= e : f(s) = t + (1 - t) * (s - e) / (1 - e)
+        g <  1 : f = t * g
+        g >= 1 : f = t + (1 - t) * (g - 1) / (g_max - 1),  g_max = max(1/t, 1/e)
+
+    which is monotone in g and sends g = 1 to the threshold t, so any
+    comparison an attack makes between two candidates comes out the same
+    and only the stopping rule moves. (Heuristics built on score
+    DIFFERENCES, such as word-importance ranking, can reorder slightly
+    because the map is piecewise linear; that changes which valid path the
+    search takes, not what counts as success.)
+
+    For the single-model signal (block score == deferral score, e <= t)
+    this reduces exactly to f(s) = t*s/e below the edge and
+    t + (1-t)(s-e)/(1-e) above it.
     """
     e, t = lower_edge, block_threshold
-    if not (0 < e <= t < 1):
-        raise ValueError(f"need 0 < lower_edge <= block_threshold < 1, got e={e}, t={t}")
+    if not (0 < t < 1):
+        raise ValueError(f"need 0 < block_threshold < 1, got t={t}")
+    if not (0 < e < math.inf):
+        raise ValueError(f"need a positive, finite lower_edge, got e={e}")
+    block_score_fn = block_score_fn or deferral_score_fn
+    g_max = max(1.0 / t, 1.0 / e)
 
     def f(text: str) -> float:
-        s = deferral_score_fn(text)
-        if s < e:
-            return t * s / e
-        return t + (1 - t) * (s - e) / (1 - e)
+        g = max(block_score_fn(text) / t, deferral_score_fn(text) / e)
+        if g < 1:
+            return t * g
+        if g_max <= 1:
+            return t
+        return min(t + (1 - t) * (g - 1) / (g_max - 1), 1.0)
 
     return f
 

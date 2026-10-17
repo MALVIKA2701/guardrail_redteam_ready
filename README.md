@@ -20,20 +20,51 @@ API is needed; the black-box API targets in Part 1 are optional.
 
 ## Results
 
-*To be filled in from `results/deferral_summary_single.md` and
-`results/deferral_summary_ensemble.md` after the full run.*
+First full run: `unitary/toxic-bert`, Jigsaw toxic comments, 181 attacked
+toxic texts, 100 calibration and 100 test benign texts, single-model
+deferral signal. Brackets are 95% bootstrap confidence intervals.
 
-| Review budget | Attack | ASR, no band | ASR, adaptive attacker with band [95% CI] | Benign review rate on test set |
+**Attack success rate (ASR) against an adaptive attacker that knows the band**
+
+| Review budget | Benign texts sent to review (test set) | Character | Word substitution | Genetic |
 |---|---|---|---|---|
-| 0% (binary baseline) | | | | 0% |
-| 5% | | | | |
-| 10% | | | | |
-| 20% | | | | |
+| 0% (binary guardrail) | 0% | 10.5% | 37.6% [30.9, 44.2] | 17.1% |
+| 5% | 4.0% [1.0, 8.0] | 1.7% | 11.6% [7.2, 16.6] | 4.4% |
+| 10% | 6.0% [2.0, 11.0] | 1.7% | 6.6% [3.3, 10.5] | 2.8% |
+| 20% | 16.0% [9.0, 23.0] | 0.0% | 4.4% [1.7, 7.7] | 2.2% |
 
-ASR (attack success rate) is the share of attacked toxic texts the guardrail
-ends up allowing. The adaptive column is the one to quote: the standard
-attacks stop as soon as they cross the 0.5 threshold, so measuring the band
-against them alone would overstate it (see [`DEFERRAL.md`](DEFERRAL.md)).
+What this shows:
+
+- **A small review budget removes most evasions.** Sending about 4–6% of
+  benign text to review cuts the strongest attack (word substitution) from
+  37.6% to 11.6% at a 5% budget and 6.6% at a 10% budget. The realized
+  review rate stayed within budget at every level.
+- **Non-adaptive evaluation overstates the defense.** Against the standard
+  attacks, which stop as soon as they cross 0.5, the band at a 5% budget
+  appears to cut word-substitution success to 3.3%. The adaptive attacker
+  reaches 11.6%, about 3.5 times higher.
+- **The effects are significant.** Every reduction from the binary
+  guardrail is significant under paired McNemar tests with Holm-Bonferroni
+  correction across all budget × attack comparisons (adjusted p < 0.001 for
+  every attack at the 5% and 10% budgets).
+- **It also catches ordinary misses.** Without any attack, toxic-bert lets
+  9.5% of toxic comments through. With the 5% band, only 0.5% are allowed;
+  the rest go to review.
+- **Why it works on this model:** toxic-bert scores almost all benign Jigsaw
+  comments below 0.03, while attacked toxic texts usually land between that
+  and 0.5, where the band catches them.
+
+ASR is the share of attacked toxic texts the guardrail ends up allowing.
+Full tables, McNemar tests with Holm correction, and query counts are in
+`results/deferral_summary_single.md` and `results/deferral_results_single.json`.
+
+**Caveats.** Results are from one model, one dataset and one run. Jigsaw's
+benign comments are mostly mild; benign but heated or profane text would
+score higher and make the band more expensive. The no-band word-attack ASR
+differed slightly between two runs on identical inputs (37.6% vs 34.2%),
+probably GPU non-determinism near the 0.5 threshold, so treat differences
+of a few points as noise. The ensemble signal is being rerun after a
+calibration fix (see `DEFERRAL.md`).
 
 ## Quick start
 

@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import sys
@@ -52,7 +53,29 @@ def test_ensemble_signal_can_defer_what_primary_allows():
 
 def test_zero_budget_gives_binary_guardrail():
     cal = calibrate_lower_edge([0.1, 0.2, 0.3], [0.1, 0.2, 0.3], 0.0)
-    assert cal["lower_edge"] == 0.5
+    assert math.isinf(cal["lower_edge"])
+    for s in [0.0, 0.3, 0.49]:
+        assert decide(s, s, cal["lower_edge"]) == ALLOW
+
+
+def test_zero_budget_defers_nothing_even_when_ensemble_flags_benign():
+    # Regression: another ensemble member scores benign text above 0.5.
+    # With budget 0 nothing may be deferred.
+    cal = calibrate_lower_edge([0.9, 0.7, 0.1], [0.05, 0.05, 0.05], 0.0)
+    for d in [0.9, 0.7, 0.1]:
+        assert decide(0.05, d, cal["lower_edge"]) == ALLOW
+
+
+def test_ensemble_edge_may_exceed_threshold_to_respect_budget():
+    # Regression for the capped-edge bug: if 30% of benign texts have an
+    # ensemble score above 0.5, a 10% budget needs an edge ABOVE 0.5.
+    rng = random.Random(1)
+    block = [rng.random() * 0.3 for _ in range(200)]
+    ens = [b if i % 10 >= 3 else 0.5 + rng.random() * 0.5 for i, b in enumerate(block)]
+    cal = calibrate_lower_edge(ens, block, 0.1)
+    assert cal["lower_edge"] > 0.5
+    deferred = sum(decide(b, d, cal["lower_edge"]) == DEFER for b, d in zip(block, ens))
+    assert deferred / len(block) <= 0.1
 
 
 def test_calibrated_edge_respects_budget_on_calibration_set():
@@ -114,7 +137,27 @@ def test_adaptive_map_rejects_bad_edges():
     with pytest.raises(ValueError):
         adaptive_score_fn(lambda t: 0.0, lower_edge=0.0)
     with pytest.raises(ValueError):
-        adaptive_score_fn(lambda t: 0.0, lower_edge=0.6)
+        adaptive_score_fn(lambda t: 0.0, lower_edge=math.inf)
+
+
+def test_adaptive_map_matches_original_formula_for_single_signal():
+    e, t = 0.3, 0.5
+    f = adaptive_score_fn(lambda x: float(x), lower_edge=e)
+    for s in [0.0, 0.1, 0.29, 0.3, 0.45, 0.7, 1.0]:
+        expected = t * s / e if s < e else t + (1 - t) * (s - e) / (1 - e)
+        assert abs(f(str(s)) - expected) < 1e-12
+
+
+def test_adaptive_ensemble_objective_needs_block_and_deferral_below():
+    # edge above the threshold (ensemble case): allowed only if the primary
+    # score < 0.5 AND the ensemble score < 0.7
+    scores = {"a": (0.6, 0.6), "b": (0.4, 0.8), "c": (0.4, 0.65)}
+    f = adaptive_score_fn(lambda x: scores[x][1], lower_edge=0.7,
+                          block_score_fn=lambda x: scores[x][0])
+    assert f("a") >= 0.5          # blocked by the primary
+    assert f("b") >= 0.5          # deferred by the ensemble
+    assert f("c") < 0.5           # allowed
+    assert decide(*scores["c"], 0.7) == ALLOW
 
 
 def test_standard_attack_stops_just_under_threshold_and_band_catches_it():
@@ -178,7 +221,7 @@ def test_run_study_end_to_end_offline():
                     sim_fn=permissive_sim, max_queries=60, min_similarity=0.0)
     assert len(res["by_budget"]) == 3
     no_band = res["by_budget"][0]
-    assert no_band["lower_edge"] == 0.5
+    assert no_band["lower_edge"] is None
     for a in ["word", "char"]:
         e = no_band["attacks"][a]
         # With no band, adaptive == standard by construction.

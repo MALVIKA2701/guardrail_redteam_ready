@@ -52,7 +52,7 @@ many of them for that reason alone, which would overstate the band's value.
 The study therefore also runs an adaptive attacker that knows the band and
 keeps going until the deferral score is below the lower edge. It is built
 without editing any attack code: the attacks receive a monotone re-scaling
-of the score that maps the lower edge to 0.5, so their own stopping rule now
+of the scores that maps "would be allowed" to "below 0.5", so their own stopping rule now
 fires at the edge.
 
 **What is reported, per budget and attack** (`results/deferral_results_<signal>.json`):
@@ -84,7 +84,7 @@ python deferral_study.py --n_samples 400 --attacks char,word,genetic --budgets 0
 python deferral_study.py --n_samples 400 --attacks char,word,genetic --signal ensemble
 ```
 
-`--budgets 0` is included on purpose: a budget of 0 sets the edge to 0.5 and
+`--budgets 0` is included on purpose: a budget of 0 turns the band off and
 reproduces the original binary guardrail, so every table carries its own
 baseline.
 
@@ -101,6 +101,35 @@ baseline.
   models is a better "I'm not sure" signal than one model's own score.
 - Higher adaptive query counts and lower similarity mean the band makes
   attacks more expensive or more visible, even where they still succeed.
+
+## Results (first run)
+
+`unitary/toxic-bert`, Jigsaw, 181 attacked toxic texts, 100 calibration /
+100 test benign texts, single-model signal. ASR against the adaptive
+attacker, with 95% bootstrap CIs:
+
+| Review budget | Review rate on test benign | Char | Word | Genetic |
+|---|---|---|---|---|
+| 0% | 0% | 10.5% | 37.6% [30.9, 44.2] | 17.1% |
+| 5% | 4.0% [1.0, 8.0] | 1.7% | 11.6% [7.2, 16.6] | 4.4% |
+| 10% | 6.0% [2.0, 11.0] | 1.7% | 6.6% [3.3, 10.5] | 2.8% |
+| 20% | 16.0% [9.0, 23.0] | 0.0% | 4.4% [1.7, 7.7] | 2.2% |
+
+At a 5% budget the standard (non-adaptive) word attack reaches only 3.3%
+under the band, against 11.6% for the adaptive attacker: evaluating the
+band only against attacks that stop at 0.5 would overstate it about 3.5×.
+All reductions from the binary guardrail are significant after Holm
+correction. Without any attack, the band also cuts toxic comments that
+toxic-bert lets through from 9.5% to 0.5% at the 5% budget.
+
+**Ensemble signal.** The first ensemble run showed that the other two
+classifiers already score some benign Jigsaw comments above 0.5. An earlier
+version of `calibrate_lower_edge` capped the edge at 0.5, which broke the
+budget for the ensemble (4% of benign text reviewed at a 0% budget). The
+cap is removed and covered by regression tests; the ensemble needs a rerun.
+In the unaffected rows (10% and 20%), the ensemble was a weaker signal than
+toxic-bert's own score (word ASR 12.2% vs 6.6% at 10%), because it must set
+a higher edge to stay within the same review budget.
 
 ## Limitations
 
