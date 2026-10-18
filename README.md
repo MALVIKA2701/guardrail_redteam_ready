@@ -1,21 +1,97 @@
-# Adversarial Robustness Evaluation of LLM Guardrail / Moderation Models
+# Selective Guardrail Evaluation
 
-A research framework for systematically evaluating the adversarial robustness
-of safety guardrail / content-moderation classifiers — the layer that sits in
-front of (or alongside) LLMs to catch disallowed content. Most published
-jailbreak research attacks the *generator* (the LLM itself). This project
-instead targets the *classifier* that is supposed to catch bad outputs, on
-the hypothesis that these models are typically smaller, less robustly
-trained, and far less studied than the LLMs they guard.
+**Can a content-moderation guardrail be evaded, and can it tell when it is
+being fooled?**
 
-Built to demonstrate research maturity for a graduate application: a clear
-threat model, multiple complementary attack families, cross-model and
-black-box transfer studies, statistically rigorous evaluation (bootstrap CIs,
-paired significance testing), ablations, a defense contribution, and
-reproducible engineering (tests, CI, auto-generated reporting) — not just a
-single attack script with one headline number.
+Safety guardrails are the classifiers that sit in front of (or alongside) a
+large language model to catch harmful text. Most jailbreak research attacks
+the LLM itself. This project attacks the guardrail instead, then asks a
+second question: if the guardrail is allowed to send uncertain cases to a
+human reviewer, how much evasion does that stop, how much human review does
+it cost, and does it still work against an attacker who knows the policy?
 
-See `ARCHITECTURE.md` for a full pipeline diagram and design rationale.
+| Part | What it asks | Authors |
+|---|---|---|
+| **1. Robustness study** | How easily can three open moderation classifiers be evaded with character, word, paraphrase, genetic and universal-trigger attacks? Do the evasions transfer between models? Does adversarial fine-tuning help? | Malvika Rajeev Kappadan and Samiksha Prasad ([original repo](https://github.com/MALVIKA2701/guardrail_redteam_ready)) |
+| **2. Deferral study** | Can a three-way guardrail (block / defer to a human / allow), calibrated to a fixed human-review budget, stop attacks that a binary guardrail lets through, including adaptive attacks aimed at the deferral band itself? | Samiksha Prasad (`deferral/`, `deferral_study.py`, [`DEFERRAL.md`](DEFERRAL.md)) |
+
+Everything runs on open-weight models on a CPU or a free Colab GPU. No paid
+API is needed; the black-box API targets in Part 1 are optional.
+
+## Results
+
+First full run: `unitary/toxic-bert`, Jigsaw toxic comments, 181 attacked
+toxic texts, 100 calibration and 100 test benign texts, single-model
+deferral signal. Brackets are 95% bootstrap confidence intervals.
+
+![Attack success vs. human-review rate for the character, word-substitution and genetic attacks, standard and adaptive attackers](docs/figures/deferral_tradeoff_toxicbert_jigsaw.png)
+
+**Attack success rate (ASR) against an adaptive attacker that knows the band**
+
+| Review budget | Benign texts sent to review (test set) | Character | Word substitution | Genetic |
+|---|---|---|---|---|
+| 0% (binary guardrail) | 0% | 10.5% | 37.6% [30.9, 44.2] | 17.1% |
+| 5% | 4.0% [1.0, 8.0] | 1.7% | 11.6% [7.2, 16.6] | 4.4% |
+| 10% | 6.0% [2.0, 11.0] | 1.7% | 6.6% [3.3, 10.5] | 2.8% |
+| 20% | 16.0% [9.0, 23.0] | 0.0% | 4.4% [1.7, 7.7] | 2.2% |
+
+What this shows:
+
+- **A small review budget removes most evasions.** Sending about 4–6% of
+  benign text to review cuts the strongest attack (word substitution) from
+  37.6% to 11.6% at a 5% budget and 6.6% at a 10% budget. The realized
+  review rate stayed within budget at every level.
+- **Non-adaptive evaluation overstates the defense.** Against the standard
+  attacks, which stop as soon as they cross 0.5, the band at a 5% budget
+  appears to cut word-substitution success to 3.3%. The adaptive attacker
+  reaches 11.6%, about 3.5 times higher.
+- **The effects are significant.** Every reduction from the binary
+  guardrail is significant under paired McNemar tests with Holm-Bonferroni
+  correction across all budget × attack comparisons (adjusted p < 0.001 for
+  every attack at the 5% and 10% budgets).
+- **It also catches ordinary misses.** Without any attack, toxic-bert lets
+  9.5% of toxic comments through. With the 5% band, only 0.5% are allowed;
+  the rest go to review.
+- **Why it works on this model:** toxic-bert scores almost all benign Jigsaw
+  comments below 0.03, while attacked toxic texts usually land between that
+  and 0.5, where the band catches them.
+
+ASR is the share of attacked toxic texts the guardrail ends up allowing.
+Full tables, McNemar tests with Holm correction, and query counts are in
+`results/deferral_summary_single.md` and `results/deferral_results_single.json`.
+
+**Caveats.** Results are from one model, one dataset and one run. Jigsaw's
+benign comments are mostly mild; benign but heated or profane text would
+score higher and make the band more expensive; `run_deferral_suite.sh`
+tests this directly with a "hard benign" set, plus all three classifiers
+and three seeds. The no-band word-attack ASR
+differed slightly between two runs on identical inputs (37.6% vs 34.2%),
+probably GPU non-determinism near the 0.5 threshold, so treat differences
+of a few points as noise. The ensemble signal is being rerun after a
+calibration fix (see `DEFERRAL.md`).
+
+## Quick start
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # or the CUDA build on a GPU
+pip install -r requirements.txt
+python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
+
+python -m pytest tests/ -q                         # 86 offline tests, no downloads
+
+# Part 2: deferral study
+python deferral_study.py --mock --n_samples 8      # offline smoke test
+python deferral_study.py --n_samples 400 --attacks char,word,genetic
+bash run_deferral_suite.sh                         # every setting + figures (~1 h on a free Colab GPU)
+
+# Part 1: robustness study
+./run_fast.sh
+```
+
+The first real run downloads the classifiers and the Jigsaw dataset from
+huggingface.co. See `ARCHITECTURE.md` for the Part 1 pipeline and design
+rationale, and `DEFERRAL.md` for Part 2.
 
 ## Research Design
 
@@ -116,6 +192,16 @@ and after fine-tuning — a defense that drops ASR by flagging everything is
 not a real improvement, and this makes that failure mode visible rather
 than hiding behind a single "ASR went down" headline.
 
+### Extension: deferring to human review (`deferral/`, `deferral_study.py`)
+Instead of only blocking or allowing, a selective guardrail can send inputs
+it is unsure about to human review. This extension calibrates a deferral
+band to a chosen human-review budget (split-conformal, on held-out benign
+text), then measures how much evasion it stops against both the standard
+attacks and an **adaptive attacker that knows the band exists**. Signals:
+the primary model's own score, or disagreement across the classifier
+ensemble. See `DEFERRAL.md` for the question, method and how to read the
+results.
+
 ### Perturbation cost (`metrics/perturbation_cost.py`)
 Every attack result is paired with normalized character edit distance and
 semantic similarity, so "success" that mangles text into gibberish is
@@ -127,11 +213,11 @@ distinguishable from success that preserves fluent, natural language.
   histograms, defense before/after comparison) as PNGs.
 - `generate_report.py` — aggregates every result file into a single
   `results/report.md` with embedded figures, ready to hand to a supervisor
-  or paste into a portfolio writeup.
+  or paste into a write-up.
 
 ## Engineering quality
 
-- **`tests/`** — 59 unit tests covering attack logic, metrics, and
+- **`tests/`** — 86 unit tests covering attack logic, metrics, deferral, and
   statistics, all running fully offline against `MockClassifier` and
   pure-Python fallbacks (no model downloads or network access required).
   Run with `pytest tests/ -v`.
@@ -281,15 +367,3 @@ most worth being explicit about:
 - **Explicit opt-in required.** The script refuses to run against real APIs
   unless invoked with `--i-accept-responsible-use`, which forces a
   conscious acknowledgment of the above before any live queries are sent.
-
-## Suggested paper/portfolio structure mapped to this codebase
-
-1. Intro/motivation — this README's opening paragraph
-2. Threat model — "Threat model" section above, `ARCHITECTURE.md`
-3. Methods — `attacks/*.py` docstrings, the attack-family table above
-4. Experimental setup — `config.py`, `data/load_data.py`
-5. Results — `results/report.md`, `results/figures/*.png`
-6. Statistical validation — `stats.py` output
-7. Ablations — `ablations.py` output
-8. Defense — `defense/adversarial_finetune.py` before/after table
-9. Ethics — "Responsible use / ethics note" section above

@@ -1,0 +1,161 @@
+# Extension: Can a guardrail tell when it is being fooled?
+
+*Added by Samiksha Prasad as an extension of the original study by Malvika
+Rajeev Kappadan and Samiksha Prasad. The original attack, transfer, statistics
+and defense code is unchanged; this extension lives in `deferral/`,
+`deferral_study.py` and `tests/test_deferral.py`.*
+
+## The question
+
+The main study shows that moderation classifiers can be evaded: small
+character, word or paraphrase changes push a toxic text's score below the
+0.5 block threshold, and it is let through.
+
+Real moderation systems are rarely purely binary. Uncertain cases are often
+sent to human review. That raises a question the binary evaluation cannot
+answer:
+
+> If the guardrail is allowed to say "I'm not sure, a human should check
+> this", how much of the evasion problem goes away, how much human review
+> does that cost, and does it still hold when the attacker knows about it?
+
+## Method
+
+**Three-way policy.** `deferral/selective_guardrail.py`:
+
+| Condition | Decision |
+|---|---|
+| score ≥ 0.5 | block |
+| deferral score ≥ lower edge | defer to human review |
+| otherwise | allow |
+
+Two deferral signals are supported:
+
+- `single`: the primary classifier's own score, i.e. a confidence band just
+  below the threshold.
+- `ensemble`: the maximum score across the three registry classifiers, i.e.
+  "defer if any model is suspicious". This reuses the project's finding that
+  attacks only partly transfer between architectures.
+
+**Calibrating the band to a review budget.** The operator chooses a budget B,
+the largest share of benign traffic they are willing to send to human
+review (for example 5%, 10% or 20%). The lower edge is chosen on a
+calibration split of benign texts using a split-conformal quantile, so that
+on new benign data the expected review rate is at most B. The realized rate
+is then measured on a disjoint test split.
+
+**The adaptive attacker.** The word-substitution and genetic attacks in this
+repo stop as soon as the score drops below 0.5, so their successful examples
+sit just under the threshold by construction. A band below 0.5 would catch
+many of them for that reason alone, which would overstate the band's value.
+
+The study therefore also runs an adaptive attacker that knows the band and
+keeps going until the deferral score is below the lower edge. It is built
+without editing any attack code: the attacks receive a monotone re-scaling
+of the scores that maps "would be allowed" to "below 0.5", so their own stopping rule now
+fires at the edge.
+
+**What is reported, per budget and attack** (`results/deferral_results_<signal>.json`):
+
+- Lower edge, and realized review rate on test benign text with a bootstrap CI
+- Attack success rate (ASR) with no band (the original binary result)
+- ASR of the standard attack under the band (optimistic)
+- ASR of the adaptive attack under the band, with a bootstrap CI (the honest number)
+- Paired difference from the no-band ASR with its CI, McNemar's test, and
+  Holm-Bonferroni correction across all budget × attack comparisons
+- Extra queries and semantic similarity the adaptive attacker needs
+
+## Running it (free, no API keys)
+
+All three classifiers are open-weight and run on a CPU, so this needs no
+paid API. A free Google Colab notebook is enough.
+
+```bash
+pip install -r requirements.txt
+python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
+
+# offline smoke test
+python deferral_study.py --mock --n_samples 8
+
+# main run: single-model confidence band
+python deferral_study.py --n_samples 400 --attacks char,word,genetic --budgets 0,0.05,0.1,0.2
+
+# ensemble signal
+python deferral_study.py --n_samples 400 --attacks char,word,genetic --signal ensemble
+```
+
+### Robustness checks
+
+| Option | What it tests |
+|---|---|
+| `--primary toxic_bert` / `toxic_comment_distilbert` / `roberta_hate_dynabench` | Whether the result holds for each classifier, not just toxic-bert |
+| `--benign_source jigsaw` | The original setting: mild Jigsaw comments |
+| `--benign_source jigsaw_hard` | Benign-labelled Jigsaw comments containing strong language or insult-adjacent words (`deferral/benign_sources.py`), selected by word list, never by a model's score |
+| `--benign_source hatexplain` | "Normal" posts from HateXplain: a different platform and period |
+| `--seed 43` | A different data sample and calibration/test split |
+
+The attacked toxic texts are the same in every benign setting; only the
+benign traffic the band is calibrated and tested on changes. Benign texts
+that also appear in the attacked sample are excluded.
+
+`bash run_deferral_suite.sh` runs all of these (about an hour on a free
+Colab T4 GPU), then `deferral_report.py` builds one trade-off figure per run
+(`results/figures/deferral_tradeoff_*.png`) and a combined table with seeds
+pooled into mean ± std (`results/deferral_summary_all.md`).
+
+`--budgets 0` is included on purpose: a budget of 0 turns the band off and
+reproduces the original binary guardrail, so every table carries its own
+baseline.
+
+## How to read the results
+
+- If adaptive ASR stays well below the no-band ASR at a small budget, a
+  modest amount of human review buys real robustness, even against an
+  attacker who knows the policy.
+- If adaptive ASR climbs back to the no-band level, the band only helped
+  against attacks that stopped early. That is still a useful, publishable
+  negative result: it shows that evaluating a deferral defense against
+  non-adaptive attacks overstates it.
+- Comparing `single` with `ensemble` shows whether disagreement between
+  models is a better "I'm not sure" signal than one model's own score.
+- Higher adaptive query counts and lower similarity mean the band makes
+  attacks more expensive or more visible, even where they still succeed.
+
+## Results (first run)
+
+`unitary/toxic-bert`, Jigsaw, 181 attacked toxic texts, 100 calibration /
+100 test benign texts, single-model signal. ASR against the adaptive
+attacker, with 95% bootstrap CIs:
+
+| Review budget | Review rate on test benign | Char | Word | Genetic |
+|---|---|---|---|---|
+| 0% | 0% | 10.5% | 37.6% [30.9, 44.2] | 17.1% |
+| 5% | 4.0% [1.0, 8.0] | 1.7% | 11.6% [7.2, 16.6] | 4.4% |
+| 10% | 6.0% [2.0, 11.0] | 1.7% | 6.6% [3.3, 10.5] | 2.8% |
+| 20% | 16.0% [9.0, 23.0] | 0.0% | 4.4% [1.7, 7.7] | 2.2% |
+
+At a 5% budget the standard (non-adaptive) word attack reaches only 3.3%
+under the band, against 11.6% for the adaptive attacker: evaluating the
+band only against attacks that stop at 0.5 would overstate it about 3.5×.
+All reductions from the binary guardrail are significant after Holm
+correction. Without any attack, the band also cuts toxic comments that
+toxic-bert lets through from 9.5% to 0.5% at the 5% budget.
+
+**Ensemble signal.** The first ensemble run showed that the other two
+classifiers already score some benign Jigsaw comments above 0.5. An earlier
+version of `calibrate_lower_edge` capped the edge at 0.5, which broke the
+budget for the ensemble (4% of benign text reviewed at a 0% budget). The
+cap is removed and covered by regression tests; the ensemble needs a rerun.
+In the unaffected rows (10% and 20%), the ensemble was a weaker signal than
+toxic-bert's own score (word ASR 12.2% vs 6.6% at 10%), because it must set
+a higher edge to stay within the same review budget.
+
+## Limitations
+
+- The conformal guarantee is on the benign review rate, and only holds if
+  real benign traffic resembles the calibration split.
+- The adaptive attacker reuses this repo's search procedures. A stronger
+  optimizer could do better, so adaptive ASR is a lower bound on what a
+  determined attacker achieves.
+- In ensemble mode each attack query scores all three models, so query
+  counts are not directly comparable with single-model runs.
